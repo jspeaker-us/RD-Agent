@@ -1,3 +1,5 @@
+import platform
+
 import pandas as pd
 
 from rdagent.app.qlib_rd_loop.conf import ModelBasePropSetting
@@ -9,6 +11,33 @@ from rdagent.log import rdagent_logger as logger
 from rdagent.scenarios.qlib.developer.utils import process_factor_data
 from rdagent.scenarios.qlib.experiment.factor_experiment import QlibFactorExperiment
 from rdagent.scenarios.qlib.experiment.model_experiment import QlibModelExperiment
+
+
+def cap_training_hyperparameters_for_windows(training_hyperparameters: dict) -> dict[str, str]:
+    def as_int(value, default: int) -> int:
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+    n_epochs = training_hyperparameters.get("n_epochs", "100")
+    early_stop = training_hyperparameters.get("early_stop", 10)
+    batch_size = training_hyperparameters.get("batch_size", 256)
+    n_jobs = training_hyperparameters.get("n_jobs", 20)
+    if platform.system() == "Windows":
+        n_epochs = min(as_int(n_epochs, 100), 5)
+        early_stop = min(as_int(early_stop, 10), 3)
+        batch_size = min(as_int(batch_size, 256), 128)
+        n_jobs = 0
+
+    return {
+        "n_epochs": str(n_epochs),
+        "lr": str(training_hyperparameters.get("lr", "2e-4")),
+        "early_stop": str(early_stop),
+        "batch_size": str(batch_size),
+        "n_jobs": str(n_jobs),
+        "weight_decay": str(training_hyperparameters.get("weight_decay", 0.0001)),
+    }
 
 
 class QlibModelRunner(CachedRunner[QlibModelExperiment]):
@@ -67,6 +96,10 @@ class QlibModelRunner(CachedRunner[QlibModelExperiment]):
             "valid_start": mbps.valid_start,
             "valid_end": mbps.valid_end,
             "test_start": mbps.test_start,
+            "topk": str(getattr(mbps, "topk", 50)),
+            "n_drop": str(getattr(mbps, "n_drop", 5)),
+            "market": getattr(mbps, "market", "csi300"),
+            "benchmark": getattr(mbps, "benchmark", "SH000300"),
             "feature_names": str(list(exp.base_features.keys())),
             "feature_expressions": str(list(exp.base_features.values())),
         }
@@ -75,15 +108,7 @@ class QlibModelRunner(CachedRunner[QlibModelExperiment]):
 
         training_hyperparameters = exp.sub_tasks[0].training_hyperparameters
         if training_hyperparameters:
-            env_to_use.update(
-                {
-                    "n_epochs": str(training_hyperparameters.get("n_epochs", "100")),
-                    "lr": str(training_hyperparameters.get("lr", "2e-4")),
-                    "early_stop": str(training_hyperparameters.get("early_stop", 10)),
-                    "batch_size": str(training_hyperparameters.get("batch_size", 256)),
-                    "weight_decay": str(training_hyperparameters.get("weight_decay", 0.0001)),
-                }
-            )
+            env_to_use.update(cap_training_hyperparameters_for_windows(training_hyperparameters))
 
         logger.info(f"start to run {exp.sub_tasks[0].name} model")
         if exp.sub_tasks[0].model_type == "TimeSeries":

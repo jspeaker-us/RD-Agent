@@ -15,6 +15,7 @@ from rdagent.core.exception import CodeFormatError, CustomRuntimeError, NoOutput
 from rdagent.core.experiment import Experiment, FBWorkspace
 from rdagent.core.utils import cache_with_pickle
 from rdagent.oai.llm_utils import md5_hash
+from rdagent.utils.env import _conda_exe, _is_windows
 
 
 class FactorTask(CoSTEERTask):
@@ -160,9 +161,12 @@ class FactorFBWorkspace(FBWorkspace):
                 execution_code_path.write_text((Path(__file__).parent / "factor_execution_template.txt").read_text())
 
             try:
+                command = [FACTOR_COSTEER_SETTINGS.python_bin, str(execution_code_path)]
+                if self.target_task.version == 1 and _is_windows():
+                    command = [_conda_exe(), "run", "-n", "rdagent4qlib", "python", str(execution_code_path)]
                 subprocess.check_output(
-                    f"{FACTOR_COSTEER_SETTINGS.python_bin} {execution_code_path}",
-                    shell=True,
+                    command,
+                    shell=False,
                     cwd=self.workspace_path,
                     stderr=subprocess.STDOUT,
                     timeout=FACTOR_COSTEER_SETTINGS.file_based_execution_timeout,

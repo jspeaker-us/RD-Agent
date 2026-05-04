@@ -10,11 +10,15 @@ Tries to create uniform environment for the agent to run;
 import contextlib
 import json
 import os
+import platform
+import posixpath
 import pickle
 import re
 import select
 import shutil
 import subprocess
+import sys
+import tempfile
 import time
 import uuid
 import zipfile
@@ -22,7 +26,7 @@ from abc import abstractmethod
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import (
     Any,
@@ -136,8 +140,121 @@ def normalize_volumes(vols: dict[str, str | dict[str, str]], working_dir: str) -
     return abs_vols
 
 
+def _is_windows() -> bool:
+    return platform.system() == "Windows"
+
+
+def _host_abs_path(path: str | Path, working_dir: str | Path) -> str:
+    host_path = Path(path).expanduser()
+    if not host_path.is_absolute():
+        host_path = Path(working_dir).expanduser() / host_path
+    return str(host_path.resolve())
+
+
+def _container_abs_path(path: str, working_dir: str) -> str:
+    # Docker bind destinations are paths inside a Linux container even when the host is Windows.
+    raw = str(PurePosixPath(path))
+    if raw.startswith("/"):
+        return posixpath.normpath(raw)
+    return posixpath.normpath(posixpath.join(working_dir, raw))
+
+
+def normalize_docker_volumes(
+    vols: dict[str, str | dict[str, str]], host_working_dir: str | Path, container_working_dir: str
+) -> dict:
+    normalized: dict[str, str | dict[str, str]] = {}
+    for host_path, vinfo in vols.items():
+        abs_host_path = _host_abs_path(host_path, host_working_dir)
+        if isinstance(vinfo, dict):
+            next_vinfo = vinfo.copy()
+            next_vinfo["bind"] = _container_abs_path(next_vinfo["bind"], container_working_dir)
+            normalized[abs_host_path] = next_vinfo
+        else:
+            normalized[abs_host_path] = _container_abs_path(vinfo, container_working_dir)
+    return normalized
+
+
+def _rdagent_temp_dir(name: str) -> Path:
+    path = Path(tempfile.gettempdir()) / "rdagent" / name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _extra_volumes_have_sample_path(volumes: Mapping) -> bool:
+    return any("sample" in Path(str(path)).parts for path in volumes.keys())
+
+
+def _conda_env_names() -> set[str]:
+    try:
+        result = subprocess.run([_conda_exe(), "env", "list", "--json"], capture_output=True, text=True, check=False)
+        if result.returncode == 0:
+            payload = json.loads(result.stdout)
+            return {Path(env_path).name for env_path in payload.get("envs", [])}
+    except Exception as exc:  # pragma: no cover - best-effort fallback
+        logger.warning(f"Failed to query conda env list as JSON: {exc}")
+    return set()
+
+
+def _conda_exe() -> str:
+    conda_exe = os.environ.get("CONDA_EXE")
+    if conda_exe:
+        return conda_exe
+
+    conda_exe = shutil.which("conda")
+    if conda_exe:
+        return conda_exe
+
+    if platform.system() != "Windows":
+        return "conda"
+
+    candidate_roots: list[Path] = []
+    for prefix in (os.environ.get("CONDA_PREFIX"), os.environ.get("CONDA_ROOT"), Path(sys.executable).parent.parent):
+        if not prefix:
+            continue
+        path = Path(prefix)
+        candidate_roots.append(path)
+        if path.parent.name.lower() == "envs":
+            candidate_roots.append(path.parent.parent)
+
+    candidate_roots = [
+        *candidate_roots,
+        Path(r"C:\ProgramData\miniforge3"),
+        Path(r"C:\ProgramData\Miniforge3"),
+        Path(r"C:\ProgramData\miniconda3"),
+        Path(r"C:\ProgramData\Miniconda3"),
+        Path(r"C:\ProgramData\anaconda3"),
+        Path(r"C:\ProgramData\Anaconda3"),
+    ]
+    user_profile = os.environ.get("USERPROFILE")
+    if user_profile:
+        user_root = Path(user_profile)
+        local_app_data = Path(os.environ.get("LOCALAPPDATA", user_root / "AppData" / "Local"))
+        for base in (user_root, local_app_data):
+            candidate_roots.extend(
+                base / name
+                for name in (
+                    "miniforge3",
+                    "Miniforge3",
+                    "miniconda3",
+                    "Miniconda3",
+                    "anaconda3",
+                    "Anaconda3",
+                )
+            )
+
+    for root in candidate_roots:
+        candidate = root / "Scripts" / "conda.exe"
+        if candidate.is_file():
+            return str(candidate)
+
+    raise FileNotFoundError(
+        "Unable to locate conda executable. Set the CONDA_EXE environment variable to the full path of "
+        "conda.exe, for example C:\\ProgramData\\miniforge3\\Scripts\\conda.exe."
+    )
+
+
 def pull_image_with_progress(image: str) -> None:
-    client = docker.APIClient(base_url="unix://var/run/docker.sock")
+    client = docker.APIClient.from_env()
     pull_logs = client.pull(image, stream=True, decode=True)
     progress_bars = {}
 
@@ -421,28 +538,32 @@ class Env(Generic[ASpecificEnvConf]):
             log_file_relative_path = log_file.relative_to(Path(local_path))
             entry = f"{entry} > {log_file_relative_path} 2>&1"
 
-        if self.conf.running_timeout_period is None:
-            timeout_cmd = entry
-        else:
-            timeout_cmd = f"timeout --kill-after=10 {self.conf.running_timeout_period} {entry}"
-        entry_add_timeout = (
-            f"/bin/sh -c '"  # start of the sh command
-            + f"{timeout_cmd}; entry_exit_code=$?; "
-            + (
-                f"{_get_chmod_cmd(self.conf.mount_path)}; "
-                # We don't have to change the permission of the cache and input folder to remove it
-                # + f"if [ -d {self.conf.mount_path}/cache ]; then chmod 777 {self.conf.mount_path}/cache; fi; " +
-                #     f"if [ -d {self.conf.mount_path}/input ]; then chmod 777 {self.conf.mount_path}/input; fi; "
-                if isinstance(self.conf, DockerConf)
-                else ""
+        if isinstance(self.conf, DockerConf) or not _is_windows():
+            if self.conf.running_timeout_period is None:
+                timeout_cmd = entry
+            else:
+                timeout_cmd = f"timeout --kill-after=10 {self.conf.running_timeout_period} {entry}"
+            entry_to_run = (
+                f"/bin/sh -c '"  # start of the sh command
+                + f"{timeout_cmd}; entry_exit_code=$?; "
+                + (
+                    f"{_get_chmod_cmd(self.conf.mount_path)}; "
+                    # We don't have to change the permission of the cache and input folder to remove it
+                    # + f"if [ -d {self.conf.mount_path}/cache ]; then chmod 777 {self.conf.mount_path}/cache; fi; " +
+                    #     f"if [ -d {self.conf.mount_path}/input ]; then chmod 777 {self.conf.mount_path}/input; fi; "
+                    if isinstance(self.conf, DockerConf)
+                    else ""
+                )
+                + "exit $entry_exit_code"
+                + "'"  # end of the sh command
             )
-            + "exit $entry_exit_code"
-            + "'"  # end of the sh command
-        )
+        else:
+            # Native Windows LocalEnv/CondaEnv uses Python-managed timeouts in _run.
+            entry_to_run = entry
 
         if self.conf.enable_cache:
             result = self.cached_run(
-                entry_add_timeout,
+                entry_to_run,
                 local_path,
                 env,
                 running_extra_volume,
@@ -451,7 +572,7 @@ class Env(Generic[ASpecificEnvConf]):
             )
         else:
             result = self.__run_with_retry(
-                entry_add_timeout,
+                entry_to_run,
                 local_path,
                 env,
                 running_extra_volume,
@@ -604,9 +725,8 @@ class LocalEnv(Env[ASpecificLocalConf]):
         if self.conf.extra_volumes is not None:
             for lp, rp in self.conf.extra_volumes.items():
                 volumes[lp] = rp["bind"] if isinstance(rp, dict) else rp
-            cache_path = "/tmp/sample" if "/sample/" in "".join(self.conf.extra_volumes.keys()) else "/tmp/full"
-            Path(cache_path).mkdir(parents=True, exist_ok=True)
-            volumes[cache_path] = T("scenarios.data_science.share:scen.cache_path").r()
+            cache_path = _rdagent_temp_dir("sample" if _extra_volumes_have_sample_path(self.conf.extra_volumes) else "full")
+            volumes[str(cache_path)] = T("scenarios.data_science.share:scen.cache_path").r()
         for lp, rp in running_extra_volume.items():
             volumes[lp] = rp
 
@@ -624,7 +744,10 @@ class LocalEnv(Env[ASpecificLocalConf]):
                         link_path.parent.mkdir(parents=True, exist_ok=True)
                     if link_path.exists() or link_path.is_symlink():
                         link_path.unlink()
-                    link_path.symlink_to(real_path)
+                    if _is_windows():
+                        link_path.symlink_to(real_path, target_is_directory=real_path.is_dir())
+                    else:
+                        link_path.symlink_to(real_path)
                     created_links.append(link_path)
                 yield
             finally:
@@ -644,13 +767,12 @@ class LocalEnv(Env[ASpecificLocalConf]):
             if "CUDA_VISIBLE_DEVICES" in os.environ and "CUDA_VISIBLE_DEVICES" not in env:
                 env["CUDA_VISIBLE_DEVICES"] = os.environ["CUDA_VISIBLE_DEVICES"]
 
-            path = [
-                *self.conf.bin_path.split(":"),
-                "/bin/",
-                "/usr/bin/",
-                *env.get("PATH", "").split(":"),
-            ]
-            env["PATH"] = ":".join(path)
+            path = [*filter(None, self.conf.bin_path.split(os.pathsep))]
+            if not _is_windows():
+                path.extend(["/bin/", "/usr/bin/"])
+            path.extend(filter(None, os.environ.get("PATH", "").split(os.pathsep)))
+            path.extend(filter(None, env.get("PATH", "").split(os.pathsep)))
+            env["PATH"] = os.pathsep.join(path)
 
             if entry is None:
                 entry = self.conf.default_entry
@@ -680,11 +802,13 @@ class LocalEnv(Env[ASpecificLocalConf]):
                 universal_newlines=True,
             )
 
+            timeout = self.conf.running_timeout_period
+
             # Setup polling
             if process.stdout is None or process.stderr is None:
                 raise RuntimeError("The subprocess did not correctly create stdout/stderr pipes")
 
-            if self.conf.live_output:
+            if self.conf.live_output and hasattr(select, "poll"):
                 stdout_fd = process.stdout.fileno()
                 stderr_fd = process.stderr.fileno()
 
@@ -724,7 +848,12 @@ class LocalEnv(Env[ASpecificLocalConf]):
                     combined_output += remaining_error
             else:
                 # Sacrifice real-time output to avoid possible standard I/O hangs
-                out, err = process.communicate()
+                try:
+                    out, err = process.communicate(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    out, err = process.communicate()
+                    return (out or "") + (err or ""), 124
                 Console().print(out, end="", markup=False)
                 Console().print(err, end="", markup=False)
                 combined_output = out + err
@@ -751,12 +880,20 @@ class CondaConf(LocalConf):
         to ensure bin_path is set correctly even if the conda env was just created.
         """
         conda_path_result = subprocess.run(
-            f"conda run -n {self.conda_env_name} --no-capture-output env | grep '^PATH='",
+            [
+                _conda_exe(),
+                "run",
+                "-n",
+                self.conda_env_name,
+                "python",
+                "-c",
+                "import os; print(os.environ.get('PATH', ''))",
+            ],
             capture_output=True,
             text=True,
-            shell=True,
+            shell=False,
         )
-        self.bin_path = conda_path_result.stdout.strip().split("=")[1] if conda_path_result.returncode == 0 else ""
+        self.bin_path = conda_path_result.stdout.strip() if conda_path_result.returncode == 0 else ""
 
 
 class MLECondaConf(CondaConf):
@@ -840,28 +977,65 @@ class QlibCondaEnv(LocalEnv[QlibCondaConf]):
     def prepare(self) -> None:
         """Prepare the conda environment if not already created."""
         try:
-            envs = subprocess.run("conda env list", capture_output=True, text=True, shell=True)
-            if self.conf.conda_env_name not in envs.stdout:
+            if self.conf.conda_env_name not in _conda_env_names():
                 print(f"[yellow]Conda env '{self.conf.conda_env_name}' not found, creating...[/yellow]")
                 subprocess.check_call(
-                    f"conda create -y -n {self.conf.conda_env_name} python=3.10",
-                    shell=True,
+                    [_conda_exe(), "create", "-y", "-n", self.conf.conda_env_name, "python=3.10"],
+                    shell=False,
                 )
                 subprocess.check_call(
-                    f"conda run -n {self.conf.conda_env_name} pip install --upgrade pip cython",
-                    shell=True,
+                    [
+                        _conda_exe(),
+                        "run",
+                        "-n",
+                        self.conf.conda_env_name,
+                        "python",
+                        "-m",
+                        "pip",
+                        "install",
+                        "--upgrade",
+                        "pip",
+                        "cython",
+                    ],
+                    shell=False,
                 )
                 subprocess.check_call(
-                    f"conda run -n {self.conf.conda_env_name} pip install git+https://github.com/microsoft/qlib.git@2fb9380b342556ddb50a4b24e4fe8655d548b2b8",
-                    shell=True,
+                    [
+                        _conda_exe(),
+                        "run",
+                        "-n",
+                        self.conf.conda_env_name,
+                        "python",
+                        "-m",
+                        "pip",
+                        "install",
+                        "git+https://github.com/microsoft/qlib.git@2fb9380b342556ddb50a4b24e4fe8655d548b2b8",
+                    ],
+                    shell=False,
                 )
                 subprocess.check_call(
-                    f"conda run -n {self.conf.conda_env_name} pip install catboost xgboost tables torch",
-                    shell=True,
+                    [
+                        _conda_exe(),
+                        "run",
+                        "-n",
+                        self.conf.conda_env_name,
+                        "python",
+                        "-m",
+                        "pip",
+                        "install",
+                        "catboost",
+                        "xgboost",
+                        "tables",
+                        "torch",
+                    ],
+                    shell=False,
                 )
+
+            self.conf._update_bin_path()
 
         except Exception as e:
             print(f"[red]Failed to prepare conda env: {e}[/red]")
+            raise
 
 
 # ========== Conda Environment Configuration Loader ==========
@@ -878,10 +1052,10 @@ def _sync_conda_cache_with_real_envs() -> None:
     """Ensure the prepared cache includes environments that already exist on disk."""
     try:
         result = subprocess.run(
-            "conda env list",
+            [_conda_exe(), "env", "list"],
             capture_output=True,
             text=True,
-            shell=True,
+            shell=False,
             check=False,
         )
     except Exception as exc:  # pragma: no cover - best-effort helper
@@ -914,14 +1088,19 @@ def _prepare_conda_env(env_name: str, requirements_file: Path, python_version: s
         python_version: Python version for the environment
     """
     # 1. Create conda environment if not exists
-    result = subprocess.run(f"conda env list | grep -q '^{env_name} '", shell=True)
-    if result.returncode != 0:
+    if env_name not in _conda_env_names():
         print(f"[yellow]Creating conda env '{env_name}' (Python {python_version})...[/yellow]")
-        subprocess.check_call(f"conda create -y -n {env_name} python={python_version}", shell=True)
-        subprocess.check_call(f"conda run -n {env_name} pip install --upgrade pip", shell=True)
+        subprocess.check_call([_conda_exe(), "create", "-y", "-n", env_name, f"python={python_version}"], shell=False)
+        subprocess.check_call(
+            [_conda_exe(), "run", "-n", env_name, "python", "-m", "pip", "install", "--upgrade", "pip"],
+            shell=False,
+        )
 
     print(f"[yellow]Installing dependencies from {requirements_file.name}...[/yellow]")
-    subprocess.check_call(f"conda run -n {env_name} pip install -r {requirements_file}", shell=True)
+    subprocess.check_call(
+        [_conda_exe(), "run", "-n", env_name, "python", "-m", "pip", "install", "-r", str(requirements_file)],
+        shell=False,
+    )
     print(f"[green]Conda env '{env_name}' ready[/green]")
 
     _CONDA_ENV_PREPARED.add(env_name)
@@ -961,8 +1140,20 @@ class FTCondaEnv(LocalEnv[FTCondaConf]):
             # Note: flash-attn>=2.8 is required for B200 (sm_100) support
             print("[yellow]Installing flash-attn (compiling, may take a few minutes)...[/yellow]")
             subprocess.check_call(
-                f"conda run -n {self.conf.conda_env_name} pip install 'flash-attn>=2.8' --no-build-isolation --no-cache-dir",
-                shell=True,
+                [
+                    _conda_exe(),
+                    "run",
+                    "-n",
+                    self.conf.conda_env_name,
+                    "python",
+                    "-m",
+                    "pip",
+                    "install",
+                    "flash-attn>=2.8",
+                    "--no-build-isolation",
+                    "--no-cache-dir",
+                ],
+                shell=False,
             )
 
             # Re-update bin_path after prepare() in case the conda env was just created
@@ -1426,22 +1617,25 @@ class DockerEnv(Env[DockerConf]):
 
         volumes = {}
         if local_path is not None:
-            local_path = os.path.abspath(local_path)
+            local_path = str(Path(local_path).expanduser().resolve())
             volumes[local_path] = {"bind": self.conf.mount_path, "mode": "rw"}
 
         if self.conf.extra_volumes is not None:
             for lp, rp in self.conf.extra_volumes.items():
                 volumes[lp] = rp if isinstance(rp, dict) else {"bind": rp, "mode": self.conf.extra_volume_mode}
-            cache_path = "/tmp/sample" if "/sample/" in "".join(self.conf.extra_volumes.keys()) else "/tmp/full"
-            Path(cache_path).mkdir(parents=True, exist_ok=True)
-            volumes[cache_path] = {
+            cache_path = _rdagent_temp_dir("sample" if _extra_volumes_have_sample_path(self.conf.extra_volumes) else "full")
+            volumes[str(cache_path)] = {
                 "bind": T("scenarios.data_science.share:scen.cache_path").r(),
                 "mode": "rw",
             }
         for lp, rp in running_extra_volume.items():
             volumes[lp] = rp if isinstance(rp, dict) else {"bind": rp, "mode": self.conf.extra_volume_mode}
 
-        volumes = normalize_volumes(cast(dict[str, str | dict[str, str]], volumes), self.conf.mount_path)
+        volumes = normalize_docker_volumes(
+            cast(dict[str, str | dict[str, str]], volumes),
+            host_working_dir=local_path,
+            container_working_dir=self.conf.mount_path,
+        )
 
         log_output = ""
         container: docker.models.containers.Container | None = None  # type: ignore[no-any-unimported]

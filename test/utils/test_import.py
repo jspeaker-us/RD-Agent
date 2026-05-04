@@ -44,7 +44,7 @@ class TestRDAgentImports(unittest.TestCase):
             if "extract_parameters" in fstr:
                 continue
 
-            yield fstr[fstr.index("rdagent") : -3].replace("/", ".")
+            yield ".".join(file.relative_to(directory).with_suffix("").parts)
 
     def test_import_modules(self):
         print(self.modules)

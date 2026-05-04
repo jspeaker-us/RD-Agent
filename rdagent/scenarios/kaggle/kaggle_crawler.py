@@ -1,6 +1,7 @@
 # %%
 import bisect
 import json
+import os
 import shutil
 import subprocess
 import tarfile
@@ -24,6 +25,24 @@ from rdagent.oai.llm_utils import APIBackend
 from rdagent.scenarios.data_science.debug.data import create_debug_data
 from rdagent.utils.agent.tpl import T
 from rdagent.utils.env import MLEBDockerEnv
+
+
+def _safe_extract_tar(tar_ref: tarfile.TarFile, target_path: Path) -> None:
+    target_path = target_path.resolve()
+    for member in tar_ref.getmembers():
+        member_path = (target_path / member.name).resolve()
+        if os.path.commonpath([str(target_path), str(member_path)]) != str(target_path):
+            raise ValueError(f"Unsafe tar member path: {member.name}")
+    tar_ref.extractall(target_path)
+
+
+def _safe_extract_zip(zip_ref: zipfile.ZipFile, target_path: Path) -> None:
+    target_path = target_path.resolve()
+    for member in zip_ref.infolist():
+        member_path = (target_path / member.filename).resolve()
+        if os.path.commonpath([str(target_path), str(member_path)]) != str(target_path):
+            raise ValueError(f"Unsafe zip member path: {member.filename}")
+    zip_ref.extractall(target_path)
 
 # %%
 options = webdriver.ChromeOptions()
@@ -109,10 +128,15 @@ def crawl_descriptions(
 
 def download_data(competition: str, settings: ExtendedBaseSettings, enable_create_debug_data: bool = True) -> None:
     local_path = settings.local_data_path
+    competition_local_path = Path(local_path) / competition
+    if competition_local_path.exists() and any(competition_local_path.iterdir()):
+        logger.info(f"Found prepared data for {competition} at {competition_local_path}, skip downloading.")
+        if enable_create_debug_data and not Path(local_path, "sample", competition).exists():
+            create_debug_data(competition, dataset_path=local_path)
+        return
     if settings.if_using_mle_data:
         zipfile_path = f"{local_path}/zip_files"
         zip_competition_path = Path(zipfile_path) / competition
-        competition_local_path = Path(local_path) / competition
 
         if not zip_competition_path.exists():
             mleb_env = MLEBDockerEnv()
@@ -127,24 +151,22 @@ def download_data(competition: str, settings: ExtendedBaseSettings, enable_creat
         if not competition_local_path.exists() or list(competition_local_path.iterdir()) == []:
             competition_local_path.mkdir(parents=True, exist_ok=True)
 
-            mleb_env = MLEBDockerEnv()
-            mleb_env.prepare()
-            mleb_env.check_output(
-                f"cp -r ./zip_files/{competition}/prepared/public/* ./{competition}", local_path=local_path
-            )
+            prepared_public_path = zip_competition_path / "prepared" / "public"
+            for item in prepared_public_path.iterdir():
+                target = competition_local_path / item.name
+                if item.is_dir():
+                    shutil.copytree(item, target, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(item, target)
 
             for zip_path in competition_local_path.rglob("*.zip"):
                 with zipfile.ZipFile(zip_path, "r") as zip_ref:
                     if len(zip_ref.namelist()) == 1:
-                        mleb_env.check_output(
-                            f"unzip -o ./{zip_path.relative_to(competition_local_path)} -d {zip_path.parent.relative_to(competition_local_path)}",
-                            local_path=competition_local_path,
-                        )
+                        _safe_extract_zip(zip_ref, zip_path.parent)
                     else:
-                        mleb_env.check_output(
-                            f"mkdir -p ./{zip_path.parent.relative_to(competition_local_path)}/{zip_path.stem}; unzip -o ./{zip_path.relative_to(competition_local_path)} -d ./{zip_path.parent.relative_to(competition_local_path)}/{zip_path.stem}",
-                            local_path=competition_local_path,
-                        )
+                        target_path = zip_path.parent / zip_path.stem
+                        target_path.mkdir(parents=True, exist_ok=True)
+                        _safe_extract_zip(zip_ref, target_path)
             for tar_path in competition_local_path.rglob("*.tar*"):
                 if not tarfile.is_tarfile(tar_path):
                     logger.error(f"{tar_path} is not a valid tar file.")
@@ -152,16 +174,12 @@ def download_data(competition: str, settings: ExtendedBaseSettings, enable_creat
                 is_gzip_file = open(tar_path, "rb").read(2) == b"\x1f\x8b"
                 with tarfile.open(tar_path, "r:gz") if is_gzip_file else tarfile.open(tar_path, "r") as tar_ref:
                     if len(tar_ref.getmembers()) == 1:
-                        mleb_env.check_output(
-                            f"tar -{'xzf' if is_gzip_file else 'xf'} ./{tar_path.relative_to(competition_local_path)} -C {tar_path.parent.relative_to(competition_local_path)}",
-                            local_path=competition_local_path,
-                        )
+                        _safe_extract_tar(tar_ref, tar_path.parent)
                     else:
                         folder_name = tar_path.name.replace(".tar", "").replace(".gz", "")
-                        mleb_env.check_output(
-                            f"mkdir -p ./{tar_path.parent.relative_to(competition_local_path)}/{folder_name}; tar -{'xzf' if is_gzip_file else 'xf'} ./{tar_path.relative_to(competition_local_path)} -C ./{tar_path.parent.relative_to(competition_local_path)}/{folder_name}",
-                            local_path=competition_local_path,
-                        )
+                        target_path = tar_path.parent / folder_name
+                        target_path.mkdir(parents=True, exist_ok=True)
+                        _safe_extract_tar(tar_ref, target_path)
             # NOTE:
             # Patching:  due to mle has special renaming mechanism for different competition;
             # We have to switch the schema back to a uniform one;
@@ -202,7 +220,7 @@ def download_data(competition: str, settings: ExtendedBaseSettings, enable_creat
 
 def unzip_data(unzip_file_path: str, unzip_target_path: str) -> None:
     with zipfile.ZipFile(unzip_file_path, "r") as zip_ref:
-        zip_ref.extractall(unzip_target_path)
+        _safe_extract_zip(zip_ref, Path(unzip_target_path))
 
 
 @cache_with_pickle(hash_func=lambda x: x, force=True)

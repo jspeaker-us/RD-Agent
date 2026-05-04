@@ -954,7 +954,9 @@ You help users retrieve relevant knowledge from community discussions and public
         candidate_scores = [current_sota_score_in_current_trace for i in range(len(target_texts))]
         candidate_scores = torch.tensor(candidate_scores, dtype=torch.float32).unsqueeze(1)
         history_scores = torch.tensor(history_scores, dtype=torch.float32).unsqueeze(0)
-        bigger_is_better = get_metric_direction(competition)
+        bigger_is_better = getattr(self.scen, "metric_direction", None)
+        if bigger_is_better is None:
+            bigger_is_better = get_metric_direction(competition)
         if bigger_is_better:
             score_diff_matrix = history_scores - candidate_scores
         else:
@@ -1017,7 +1019,9 @@ You help users retrieve relevant knowledge from community discussions and public
             if trace.hist[loop_id2idx[loop_id]][1].decision == True
         ]
         if score_list:
-            bigger_is_better = get_metric_direction(competition)
+            bigger_is_better = getattr(trace.scen, "metric_direction", None)
+            if bigger_is_better is None:
+                bigger_is_better = get_metric_direction(competition)
             if bigger_is_better:
                 return max(score_list), len(loop_id_list)
             else:

@@ -1,4 +1,6 @@
 import copyreg
+import hashlib
+import math
 from typing import Any, Literal, Optional, Type, TypedDict, Union, cast
 
 import numpy as np
@@ -45,6 +47,27 @@ LITELLM_SETTINGS = LiteLLMSettings()
 ACC_COST = 0.0
 
 
+def _redact_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    sensitive_terms = ("key", "token", "secret", "password")
+    return {
+        key: "***" if any(term in key.lower() for term in sensitive_terms) and value else value
+        for key, value in settings.items()
+    }
+
+
+def _hash_embedding(text: str, dimensions: int = 1536) -> list[float]:
+    vector = [0.0] * dimensions
+    for token in text.lower().split():
+        digest = hashlib.blake2b(token.encode("utf-8", errors="ignore"), digest_size=8).digest()
+        index = int.from_bytes(digest[:4], "little") % dimensions
+        sign = 1.0 if digest[4] & 1 else -1.0
+        vector[index] += sign
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm == 0:
+        return vector
+    return [value / norm for value in vector]
+
+
 class LiteLLMAPIBackend(APIBackend):
     """LiteLLM implementation of APIBackend interface"""
 
@@ -52,8 +75,8 @@ class LiteLLMAPIBackend(APIBackend):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         if not self.__class__._has_logged_settings:
-            logger.info(f"{LITELLM_SETTINGS}")
-            logger.log_object(LITELLM_SETTINGS.model_dump(), tag="LITELLM_SETTINGS")
+            logger.info(f"{_redact_settings(LITELLM_SETTINGS.model_dump())}")
+            logger.log_object(_redact_settings(LITELLM_SETTINGS.model_dump()), tag="LITELLM_SETTINGS")
             self.__class__._has_logged_settings = True
         super().__init__(*args, **kwargs)
 
@@ -73,6 +96,9 @@ class LiteLLMAPIBackend(APIBackend):
         Call the embedding function
         """
         model_name = LITELLM_SETTINGS.embedding_model
+        if model_name == "local/hash-embedding":
+            logger.info(f"{LogColors.GREEN}Using local hash embedding{LogColors.END}", tag="debug_litellm_emb")
+            return [_hash_embedding(text) for text in input_content_list]
         logger.info(f"{LogColors.GREEN}Using emb model{LogColors.END} {model_name}", tag="debug_litellm_emb")
         if LITELLM_SETTINGS.log_llm_chat_content:
             logger.info(
@@ -156,6 +182,7 @@ class LiteLLMAPIBackend(APIBackend):
             messages=messages,
             stream=LITELLM_SETTINGS.chat_stream,
             max_retries=0,
+            allowed_openai_params=["reasoning_effort"] if complete_kwargs.get("reasoning_effort") else None,
             **complete_kwargs,
             **kwargs,
         )

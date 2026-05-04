@@ -1,5 +1,6 @@
 import json
 import os
+import platform
 import re
 import shutil
 from pathlib import Path
@@ -297,12 +298,20 @@ def clear_workspace(workspace: FBWorkspace, env: Env) -> None:
         remove_items.append(item.name)
 
     if remove_items:
-        ws_prefix = get_workspace_prefix(env)
-        # Construct rm command with all items to remove
-        # Items are relative to workspace root inside the env
-        items_str = " ".join([f"'{ws_prefix}/{item}'" for item in remove_items])
-        cmd = f"rm -rf {items_str}"
-        workspace.execute(env=env, entry=cmd)
+        if platform.system() == "Windows":
+            for item in remove_items:
+                target = target_path / item
+                if target.is_dir():
+                    shutil.rmtree(target, ignore_errors=True)
+                else:
+                    target.unlink(missing_ok=True)
+        else:
+            ws_prefix = get_workspace_prefix(env)
+            # Construct rm command with all items to remove.
+            # Items are relative to workspace root inside the env.
+            items_str = " ".join([f"'{ws_prefix}/{item}'" for item in remove_items])
+            cmd = f"rm -rf {items_str}"
+            workspace.execute(env=env, entry=cmd)
 
 
 def get_benchmark_env(

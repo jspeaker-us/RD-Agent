@@ -12,6 +12,7 @@ authors = [
 classifiers = [
   "Development Status :: 3 - Alpha",
   "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
@@ -107,8 +108,11 @@ select = ["ALL"]
 "docs/conf.py" = ["INP001"]
 "test/*" = ["S101"]
 
-[tool.setuptools]
-packages = ["rdagent"]
+[tool.setuptools.packages.find]
+include = ["rdagent*"]
+
+[tool.setuptools.package-data]
+rdagent = ["**/*.json", "**/*.md", "**/*.txt", "**/*.yaml", "**/*.yml", "**/Dockerfile"]
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}

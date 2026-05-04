@@ -212,11 +212,20 @@ class FBWorkspace(Workspace):
         for data_file_path in data_path.iterdir():
             workspace_data_file_path = workspace_path / data_file_path.name
             if workspace_data_file_path.exists():
-                workspace_data_file_path.unlink()
+                if workspace_data_file_path.is_dir():
+                    shutil.rmtree(workspace_data_file_path)
+                else:
+                    workspace_data_file_path.unlink()
             if platform.system() in ("Linux", "Darwin"):
                 workspace_data_file_path.symlink_to(data_file_path)
             if platform.system() == "Windows":
-                os.link(data_file_path, workspace_data_file_path)
+                if data_file_path.is_dir():
+                    shutil.copytree(data_file_path, workspace_data_file_path)
+                else:
+                    try:
+                        os.link(data_file_path, workspace_data_file_path)
+                    except OSError:
+                        shutil.copy2(data_file_path, workspace_data_file_path)
 
     DEL_KEY = "__DEL__"
 

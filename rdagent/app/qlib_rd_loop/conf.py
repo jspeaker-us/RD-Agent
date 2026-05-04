@@ -48,6 +48,18 @@ class ModelBasePropSetting(BasePropSetting):
     test_end: Optional[str] = "2020-08-01"
     """End date of the test / backtest segment"""
 
+    topk: int = 50
+    """Portfolio size for TopkDropoutStrategy."""
+
+    n_drop: int = 5
+    """Number of holdings replaced on each rebalance."""
+
+    market: str = "csi300"
+    """Qlib instrument universe used for training and backtesting."""
+
+    benchmark: str = "SH000300"
+    """Benchmark instrument used for excess return analysis."""
+
 
 class FactorBasePropSetting(BasePropSetting):
     model_config = SettingsConfigDict(env_prefix="QLIB_FACTOR_", protected_namespaces=())
@@ -91,6 +103,18 @@ class FactorBasePropSetting(BasePropSetting):
 
     test_end: Optional[str] = "2020-08-01"
     """End date of the test / backtest segment"""
+
+    topk: int = 50
+    """Portfolio size for TopkDropoutStrategy."""
+
+    n_drop: int = 5
+    """Number of holdings replaced on each rebalance."""
+
+    market: str = "csi300"
+    """Qlib instrument universe used for training and backtesting."""
+
+    benchmark: str = "SH000300"
+    """Benchmark instrument used for excess return analysis."""
 
 
 class FactorFromReportPropSetting(FactorBasePropSetting):
@@ -168,6 +192,18 @@ class QuantBasePropSetting(BasePropSetting):
 
     test_end: Optional[str] = "2020-08-01"
     """End date of the test / backtest segment"""
+
+    topk: int = 50
+    """Portfolio size for TopkDropoutStrategy."""
+
+    n_drop: int = 5
+    """Number of holdings replaced on each rebalance."""
+
+    market: str = "csi300"
+    """Qlib instrument universe used for training and backtesting."""
+
+    benchmark: str = "SH000300"
+    """Benchmark instrument used for excess return analysis."""
 
 
 FACTOR_PROP_SETTING = FactorBasePropSetting()

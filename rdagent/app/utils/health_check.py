@@ -4,10 +4,12 @@ import socket
 import docker
 import fire
 import litellm
-from litellm import completion, embedding
+from dotenv import load_dotenv
+from litellm import completion
 from litellm.utils import ModelResponse
 
 from rdagent.log import rdagent_logger as logger
+from rdagent.oai.llm_utils import APIBackend
 from rdagent.utils.env import cleanup_container
 
 
@@ -78,12 +80,7 @@ def test_chat(chat_model, chat_api_key, chat_api_base):
 def test_embedding(embedding_model, embedding_api_key, embedding_api_base):
     logger.info(f"🧪 Testing embedding model: {embedding_model}")
     try:
-        response = embedding(
-            model=embedding_model,
-            api_key=embedding_api_key,
-            api_base=embedding_api_base,
-            input="Hello world!",
-        )
+        APIBackend().create_embedding("Hello world!")
         logger.info("✅ Embedding test passed.")
         return True
     except Exception as e:
@@ -92,6 +89,7 @@ def test_embedding(embedding_model, embedding_api_key, embedding_api_base):
 
 
 def env_check():
+    load_dotenv(".env", encoding="utf-8-sig")
     if "BACKEND" not in os.environ:
         logger.warning(
             f"We did not find BACKEND in your configuration, please add it to your .env file. "
@@ -119,6 +117,7 @@ def env_check():
         embedding_api_base = chat_api_base
     else:
         logger.error("No valid configuration was found, please check your .env file.")
+        return
 
     logger.info("🚀 Starting test...\n")
     result_embedding = test_embedding(

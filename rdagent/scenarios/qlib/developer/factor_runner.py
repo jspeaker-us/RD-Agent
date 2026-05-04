@@ -12,6 +12,7 @@ from rdagent.app.qlib_rd_loop.conf import FactorBasePropSetting
 from rdagent.components.runner import CachedRunner
 from rdagent.core.exception import FactorEmptyError
 from rdagent.log import rdagent_logger as logger
+from rdagent.scenarios.qlib.developer.model_runner import cap_training_hyperparameters_for_windows
 from rdagent.scenarios.qlib.developer.utils import process_factor_data
 from rdagent.scenarios.qlib.experiment.factor_experiment import QlibFactorExperiment
 from rdagent.scenarios.qlib.experiment.model_experiment import QlibModelExperiment
@@ -78,6 +79,10 @@ class QlibFactorRunner(CachedRunner[QlibFactorExperiment]):
             "valid_start": fbps.valid_start,
             "valid_end": fbps.valid_end,
             "test_start": fbps.test_start,
+            "topk": str(getattr(fbps, "topk", 50)),
+            "n_drop": str(getattr(fbps, "n_drop", 5)),
+            "market": getattr(fbps, "market", "csi300"),
+            "benchmark": getattr(fbps, "benchmark", "SH000300"),
             "feature_names": str(list(exp.base_features.keys())),
             "feature_expressions": str(list(exp.base_features.values())),
         }
@@ -143,15 +148,7 @@ class QlibFactorRunner(CachedRunner[QlibFactorExperiment]):
                 )
                 sota_training_hyperparameters = sota_model_exp.sub_tasks[0].training_hyperparameters
                 if sota_training_hyperparameters:
-                    env_to_use.update(
-                        {
-                            "n_epochs": str(sota_training_hyperparameters.get("n_epochs", "100")),
-                            "lr": str(sota_training_hyperparameters.get("lr", "2e-4")),
-                            "early_stop": str(sota_training_hyperparameters.get("early_stop", 10)),
-                            "batch_size": str(sota_training_hyperparameters.get("batch_size", 256)),
-                            "weight_decay": str(sota_training_hyperparameters.get("weight_decay", 0.0001)),
-                        }
-                    )
+                    env_to_use.update(cap_training_hyperparameters_for_windows(sota_training_hyperparameters))
                 sota_model_type = sota_model_exp.sub_tasks[0].model_type
                 if sota_model_type == "TimeSeries":
                     env_to_use.update(

@@ -73,12 +73,12 @@ class TestEval(TestEvalBase):
             raise NoTestEvalError(err_msg)
         workspace.inject_files(**{"grade.py": (eval_path / "grade.py").read_text()})
         workspace.inject_files(**{"submission_test.csv": (eval_path / "submission_test.csv").read_text()})
-        workspace.execute(
+        result = workspace.run(
             env=self.env,
-            entry=f"python grade.py {competition} | tee mle_score.txt",
+            entry=f"python grade.py {competition}",
         )
+        (workspace.workspace_path / "mle_score.txt").write_text(result.full_stdout)
         workspace.inject_files(**{file: workspace.DEL_KEY for file in ["grade.py", "submission_test.csv"]})
-        workspace.execute(env=self.env, entry="chmod 777 mle_score.txt")
         return (workspace.workspace_path / "mle_score.txt").read_text()
 
     def valid(self, competition: str, workspace: FBWorkspace) -> tuple[str, int]:
@@ -115,12 +115,12 @@ class MLETestEval(TestEvalBase):
         self.env.prepare()
 
     def eval(self, competition: str, workspace: FBWorkspace) -> str:
-        workspace.execute(
+        result = workspace.run(
             env=self.env,
-            entry=f"mlebench grade-sample submission.csv {competition} --data-dir /mle/data 2>&1 | tee mle_score.txt",
-            # NOTE: mlebench does not give output to stdout. so 2>&1 is very necessary !!!!!!
+            entry=f"mlebench grade-sample submission.csv {competition} --data-dir /mle/data 2>&1",
+            # NOTE: mlebench does not give output to stdout. so 2>&1 is very necessary.
         )
-        workspace.execute(env=self.env, entry="chmod 777 mle_score.txt")
+        (workspace.workspace_path / "mle_score.txt").write_text(result.full_stdout)
         return (workspace.workspace_path / "mle_score.txt").read_text()
 
     def valid(self, competition: str, workspace: FBWorkspace) -> tuple[str, int]:

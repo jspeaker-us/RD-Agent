@@ -15,6 +15,7 @@ Welcome to RDAgent's documentation!
 
    introduction
    installation_and_configuration
+   windows_validation
    scens/catalog
    project_framework_introduction
    ui

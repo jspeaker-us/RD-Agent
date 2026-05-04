@@ -14,6 +14,7 @@ from rdagent.utils.env import (
     QlibDockerConf,
     QTDockerEnv,
     cleanup_container,
+    _conda_exe,
 )
 
 DIRNAME = Path(__file__).absolute().resolve().parent
@@ -74,6 +75,22 @@ class EnvUtils(unittest.TestCase):
         code_path.mkdir(exist_ok=True)
         result = le.run(local_path=str(code_path))
         print(result.stdout, result.exit_code, result.running_time)
+
+    def test_windows_conda_exe_resolves_without_path(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows-specific Conda fallback")
+        if not Path(r"C:\ProgramData\miniforge3\Scripts\conda.exe").is_file():
+            self.skipTest("Miniforge is not installed in the validated Windows path")
+
+        old_conda_exe = os.environ.pop("CONDA_EXE", None)
+        old_path = os.environ.get("PATH", "")
+        try:
+            os.environ["PATH"] = str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32")
+            assert Path(_conda_exe()).is_file()
+        finally:
+            os.environ["PATH"] = old_path
+            if old_conda_exe is not None:
+                os.environ["CONDA_EXE"] = old_conda_exe
 
     def test_conda_error(self):
         conda_conf = CondaConf(conda_env_name="MLE")

@@ -273,7 +273,11 @@ class KaggleScen(DataScienceScen):
         return crawl_descriptions(self.competition, DS_RD_SETTING.local_data_path)
 
     def _get_direction(self):
-        return get_metric_direction(self.competition)
+        try:
+            return get_metric_direction(self.competition)
+        except Exception as e:
+            logger.warning(f"Failed to query Kaggle metric direction for {self.competition}: {e}")
+            return super()._get_direction()
 
     @property
     def rich_style_description(self) -> str:

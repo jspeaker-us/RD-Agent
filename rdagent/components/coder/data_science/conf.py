@@ -1,4 +1,5 @@
 from typing import Literal
+import platform
 
 from rdagent.app.data_science.conf import DS_RD_SETTING
 from rdagent.components.coder.CoSTEER.config import CoSTEERSettings
@@ -21,6 +22,8 @@ class DSCoderCoSTEERSettings(CoSTEERSettings):
 
     max_seconds_multiplier: int = 4
     env_type: str = "docker"
+    conda_env_name: str | None = None
+    mlebench_conda_env_name: str | None = None
     # TODO: extract a function for env and conf.
     extra_evaluator: list[str] = []
     """Extra evaluators to use"""
@@ -60,9 +63,16 @@ def get_ds_env(
         env_conf = DSDockerConf() if conf_type == "kaggle" else MLEBDockerConf()
         env = DockerEnv(conf=env_conf)
     elif conf.env_type == "conda":
+        conda_env_name = (
+            conf.conda_env_name
+            if conf_type == "kaggle"
+            else conf.mlebench_conda_env_name or conf.conda_env_name
+        ) or conf_type
         env = LocalEnv(
             conf=(
-                CondaConf(conda_env_name=conf_type) if conf_type == "kaggle" else MLECondaConf(conda_env_name=conf_type)
+                CondaConf(conda_env_name=conda_env_name)
+                if conf_type == "kaggle"
+                else MLECondaConf(conda_env_name=conda_env_name)
             )
         )
     else:
@@ -80,8 +90,15 @@ def get_clear_ws_cmd(stage: Literal["before_training", "before_inference"] = "be
     Clean the files in workspace to a specific stage
     """
     assert stage in ["before_training", "before_inference"], f"Unknown stage: {stage}"
+    targets = ["submission.csv", "scores.csv", "trace.log"]
     if DS_RD_SETTING.enable_model_dump and stage == "before_training":
-        cmd = "rm -r submission.csv scores.csv models trace.log"
+        targets.append("models")
+    if platform.system() == "Windows":
+        target_expr = repr(targets)
+        cmd = (
+            "python -c \"import pathlib, shutil; "
+            f"[shutil.rmtree(p, ignore_errors=True) if p.is_dir() else p.unlink(missing_ok=True) for p in map(pathlib.Path, {target_expr})]\""
+        )
     else:
-        cmd = "rm submission.csv scores.csv trace.log"
+        cmd = "rm -r " + " ".join(targets)
     return cmd
