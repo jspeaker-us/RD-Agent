@@ -144,6 +144,27 @@ def _is_windows() -> bool:
     return platform.system() == "Windows"
 
 
+def _kill_process_tree(process: subprocess.Popen) -> bool:
+    if not _is_windows():
+        process.kill()
+        return True
+
+    try:
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+        return True
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+        return False
+
+
 def _host_abs_path(path: str | Path, working_dir: str | Path) -> str:
     host_path = Path(path).expanduser()
     if not host_path.is_absolute():
@@ -851,8 +872,13 @@ class LocalEnv(Env[ASpecificLocalConf]):
                 try:
                     out, err = process.communicate(timeout=timeout)
                 except subprocess.TimeoutExpired:
-                    process.kill()
-                    out, err = process.communicate()
+                    cleanup_succeeded = _kill_process_tree(process)
+                    try:
+                        out, err = process.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        out, err = "", ""
+                    if not cleanup_succeeded:
+                        logger.warning("Process timed out and process-tree cleanup did not complete cleanly.")
                     return (out or "") + (err or ""), 124
                 Console().print(out, end="", markup=False)
                 Console().print(err, end="", markup=False)
