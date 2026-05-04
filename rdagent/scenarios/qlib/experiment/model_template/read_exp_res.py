@@ -2,6 +2,42 @@ import pickle
 from pathlib import Path
 
 import pandas as pd
+
+REQUIRED_OBJECTS = [
+    "portfolio_analysis/report_normal_1day.pkl",
+    "pred.pkl",
+]
+REQUIRED_METRICS = [
+    "IC",
+    "1day.excess_return_with_cost.annualized_return",
+    "1day.excess_return_with_cost.max_drawdown",
+]
+
+
+def validate_required_metrics(metrics, context):
+    if metrics.empty:
+        raise RuntimeError(f"{context} has no metrics; refusing to write qlib_res.csv.")
+    missing_metrics = [metric for metric in REQUIRED_METRICS if metric not in metrics.index]
+    if missing_metrics:
+        raise RuntimeError(f"{context} is missing required metrics: {missing_metrics}")
+
+
+def artifact_exists(recorder, artifact_path):
+    parent = str(Path(artifact_path).parent).replace("\\", "/")
+    name = Path(artifact_path).name
+    try:
+        artifacts = recorder.list_artifacts(None if parent == "." else parent)
+    except Exception:
+        return False
+    return artifact_path in artifacts or name in artifacts
+
+
+def validate_required_artifacts(recorder):
+    missing_objects = [obj for obj in REQUIRED_OBJECTS if not artifact_exists(recorder, obj)]
+    if missing_objects:
+        raise FileNotFoundError(f"Latest Qlib recorder {recorder} is missing required artifacts: {missing_objects}")
+
+
 import qlib
 from mlflow.entities import ViewType
 from mlflow.tracking import MlflowClient
@@ -39,17 +75,20 @@ for experiment in experiments:
 
 # Check if the latest recorder is found
 if latest_recorder is None:
-    print("No recorders found")
+    raise RuntimeError("No Qlib recorders found; qrun did not produce MLflow artifacts.")
 else:
     print(f"Latest recorder: {latest_recorder}")
 
     # Load the specified file from the latest recorder
     metrics = pd.Series(latest_recorder.list_metrics())
+    validate_required_metrics(metrics, f"Latest Qlib recorder {latest_recorder}")
 
     output_path = Path(__file__).resolve().parent / "qlib_res.csv"
     metrics.to_csv(output_path)
 
     print(f"Output has been saved to {output_path}")
+
+    validate_required_artifacts(latest_recorder)
 
     ret_data_frame = latest_recorder.load_object("portfolio_analysis/report_normal_1day.pkl")
     ret_data_frame.to_pickle("ret.pkl")
